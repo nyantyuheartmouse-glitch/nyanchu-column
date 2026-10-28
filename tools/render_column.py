@@ -23,6 +23,12 @@
 小さい仮名や読点の右上寄せは libraqm のvertical shapingに任せている。
 半角英数字は全角に変換して描画する。
 
+写真の切り抜き:
+    --photo-crop "x,y,w,h" で元写真から顔を中心に切り抜く範囲(左上座標と幅・高さ、
+    元画像のピクセル単位、正方形を推奨)を指定できる。指定がなければ既定値
+    DEFAULT_PHOTO_CROP (S__91226114.jpg 用に選んだ値)を使う。切り抜いた範囲を
+    丸くトリミングして使う。
+
 見出しの列の区切り:
     --heading の中に全角スラッシュ「／」または改行を入れると、そこが列(縦書きの
     1列)の区切りになる(例: "家に人型ロボットが／当たり前になる日" は2列になる)。
@@ -47,8 +53,9 @@
     既定の本文書体は --font、見出し・題字の太い明朝は --head-font で切り替えられる
     (tools/fonts/ 以下に Google Fonts(OFL)から取得した同梱フォントを使用)。
     写真(顔写真)は見出しの横に、見出しのどの列とも重ならない専用の列を確保して
-    正方形で配置し、下に肩書きを添える(写真・肩書き・見出し・本文の境界箱が
-    互いに重ならないことをスクリプト側で検査する)。
+    丸く配置し(丸の外は紙と同じ色で塗り、細い丸枠を付ける)、下に肩書きを添える
+    (写真・肩書き・見出し・本文の境界箱が互いに重ならないことをスクリプト側で検査
+    する。写真は外接する正方形を境界箱として扱う)。
 """
 import argparse
 import os
@@ -97,12 +104,16 @@ HEADER_RULE_GAP = 22
 
 # --- 写真(見出しの横)まわりのレイアウト ------------------------------
 # 写真・肩書きは見出しの列とは別の専用の列に、見出しと横並びで配置する
-# (見出しのどの列とも x 方向に重ならない)。
-PHOTO_SIZE = 124
+# (見出しのどの列とも x 方向に重ならない)。写真は丸くトリミングし、丸の外は
+# 紙の色で塗って細い丸枠を付ける。
+PHOTO_SIZE = 186              # 丸の直径(旧・正方形の一辺124pxの約1.5倍)
 PHOTO_BORDER = 3
 PHOTO_COL_GAP = 16            # 見出しの最後の列と写真の専用列の間の余白
 PHOTO_CAPTION_GAP = 10
 PHOTO_CAPTION_SIZE = 20
+# S__91226114.jpg から顔を中心に切り抜く既定範囲 (x, y, w, h)。
+# 顔が丸の中央〜やや上に来て、顔が丸の大部分を占めるように選んだ値。
+DEFAULT_PHOTO_CROP = (145, 174, 480, 480)
 PHOTO_CAPTION_LINE_H = 26
 
 SIG_CELL = 28                 # 本文末尾の署名の文字サイズ(本文より小さい)
@@ -398,18 +409,28 @@ def split_heading(raw_heading: str, cap: int):
     return cols
 
 
-def square_photo(path: str, size: int) -> Image.Image:
-    """新聞の顔写真風に、正方形トリミング+細い一本罫線で縁取る。"""
+def circular_photo(path: str, diameter: int, crop_box=None) -> Image.Image:
+    """顔写真風に、顔を中心にした正方形トリミング+丸型マスク+細い丸枠で縁取る。
+    丸の外側は紙と同じ色(PAPER)で塗り、透明にはしない。
+    crop_box は元画像のピクセル座標 (x, y, w, h)。省略時は中央の正方形を使う。"""
     im = Image.open(path).convert("RGB")
-    side = min(im.size)
-    left = (im.width - side) // 2
-    top = (im.height - side) // 2
-    im = im.crop((left, top, left + side, top + side)).resize((size, size), Image.LANCZOS)
-    out = Image.new("RGBA", (size, size), (0, 0, 0, 255))
-    out.paste(im, (0, 0))
+    if crop_box is not None:
+        x, y, w, h = crop_box
+        im = im.crop((x, y, x + w, y + h))
+    else:
+        side = min(im.size)
+        left = (im.width - side) // 2
+        top = (im.height - side) // 2
+        im = im.crop((left, top, left + side, top + side))
+    im = im.resize((diameter, diameter), Image.LANCZOS)
+
+    out = Image.new("RGBA", (diameter, diameter), PAPER + (255,))
+    mask = Image.new("L", (diameter, diameter), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, diameter - 1, diameter - 1), fill=255)
+    out.paste(im, (0, 0), mask)
     d = ImageDraw.Draw(out)
-    d.rectangle((0, 0, size - 1, size - 1), outline=INK, width=PHOTO_BORDER)
-    return out.convert("RGB").convert("RGBA")
+    d.ellipse((0, 0, diameter - 1, diameter - 1), outline=INK, width=PHOTO_BORDER)
+    return out
 
 
 def draw_double_rule(draw: ImageDraw.ImageDraw, x0: int, x1: int, y: int,
@@ -549,8 +570,9 @@ def _place_photo_and_caption(page: Page, photo_img, byline: str, body_font_path:
 
 
 def render(paragraphs, raw_heading, title, photo_path, byline, date_text, signature,
-           body_font_path, head_font_path, title_font_path, flatten, out_prefix):
-    photo_img = square_photo(photo_path, PHOTO_SIZE) if photo_path else None
+           body_font_path, head_font_path, title_font_path, flatten, out_prefix,
+           photo_crop=None):
+    photo_img = circular_photo(photo_path, PHOTO_SIZE, photo_crop) if photo_path else None
 
     pages = []
     page_no = 1
@@ -743,7 +765,10 @@ def main():
                      help="見出し(問い)。全角スラッシュ「／」や改行で列の区切り位置を指定できる"
                           "(指定がなければ助詞の直後などで自動的に区切る)")
     ap.add_argument("--title", default="ニャンちゅうの未来語り", help="題字")
-    ap.add_argument("--photo", default=None, help="顔写真(正方形に中央トリミングして見出し横の専用列に使用)")
+    ap.add_argument("--photo", default=None, help="顔写真(顔を中心に正方形トリミングして丸く見出し横の専用列に使用)")
+    ap.add_argument("--photo-crop", default=None,
+                     help="元写真から顔を中心に切り抜く範囲 \"x,y,w,h\"(省略時は中央の正方形。"
+                          "S__91226114.jpg の場合は顔を中心にした既定値 DEFAULT_PHOTO_CROP を使う)")
     ap.add_argument("--byline", default="ニャンちゅう\n自称5歳・研究好き", help="写真下の肩書き(\\nで改行)")
     ap.add_argument("--signature", default="ニャンちゅう・自称5歳の研究好き",
                      help="本文末尾に入れる署名(括弧は自動で付く)")
@@ -760,13 +785,19 @@ def main():
     byline = fullwidth(args.byline)
     date_text = fullwidth(args.date)
 
+    if args.photo_crop is not None:
+        photo_crop = tuple(int(v) for v in args.photo_crop.split(","))
+        assert len(photo_crop) == 4, "--photo-crop は \"x,y,w,h\" の4つの数値で指定するニャ"
+    else:
+        photo_crop = DEFAULT_PHOTO_CROP
+
     out_dir = os.path.dirname(args.out)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
     paths, drawn, expected = render(paragraphs, args.heading, args.title, args.photo, byline, date_text,
                                      args.signature, args.font, args.head_font, args.title_font,
-                                     args.flatten, args.out)
+                                     args.flatten, args.out, photo_crop=photo_crop)
     verify_images(paths)
     print(f"配置した文字数: {drawn} / 本文の文字数: {expected} -> OK")
     for p in paths:
