@@ -581,28 +581,41 @@ def render(paragraphs, raw_heading, title, photo_path, byline, date_text, signat
             heading_rects.append((col_x0, page.band_top, col_x1, page.band_top + col_h))
         page.cursor_x -= HEAD_PITCH
 
-    # --- 写真(見出しの横、専用の列。見出しのどの列とも重ならない) ---
+    # --- 写真(見出しの左下、専用の列。見出しのどの列とも重ならない) ---
+    # 写真と肩書きは1段目の下端(段の罫線の少し上)に下揃えで置く。その真上に
+    # 空く領域には本文の列を通常どおり流し込み、写真の高さぶんだけ列を
+    # 短く折り返す(photo_cap_short)ことで写真の上下に大きな空白を作らない。
     photo_rect = None
+    photo_zone_x0 = None
+    photo_cap_short = CHARS_PER_BAND
     if photo_img is not None:
         cap_font = get_font(PHOTO_CAPTION_SIZE, body_font_path)
+        byline_lines = byline.split("\n")
         max_cap_w = 0.0
-        for line in byline.split("\n"):
+        for line in byline_lines:
             cb = page.draw.textbbox((0, 0), line, font=cap_font)
             max_cap_w = max(max_cap_w, cb[2] - cb[0])
         content_w = max(PHOTO_SIZE, max_cap_w)
         photo_col_pitch = content_w + 24
         zone_x1 = page.cursor_x - PHOTO_COL_GAP
         zone_x0 = max(page.content_left, zone_x1 - photo_col_pitch)
-        photo_rect = _place_photo_and_caption(page, photo_img, byline, body_font_path,
-                                               zone_x0, zone_x1, page.band_top)
-        page.cursor_x = zone_x0
 
-    page.cursor_x -= COL_PITCH // 3  # 見出し/写真と本文の間の余白
+        caption_h = len(byline_lines) * PHOTO_CAPTION_LINE_H
+        block_h = PHOTO_SIZE + PHOTO_CAPTION_GAP + caption_h
+        band_bottom_first = page.band_top + BAND_H
+        photo_top_y = band_bottom_first - block_h
+
+        photo_rect = _place_photo_and_caption(page, photo_img, byline, body_font_path,
+                                               zone_x0, zone_x1, photo_top_y)
+        photo_zone_x0 = zone_x0
+        photo_cap_short = max(1, (photo_top_y - page.band_top) // CELL)
+        page.cursor_x = zone_x1
+    else:
+        page.cursor_x -= COL_PITCH // 3  # 見出しと本文の間の余白(写真なしの場合)
 
     body_font = get_font(CELL, body_font_path)
     tcy_font = get_font(CELL, body_font_path)
     tcy_target_w = round(COL_PITCH * 0.9)
-    row_cap = CHARS_PER_BAND
 
     total_chars_in = sum(len(p) for p in paragraphs)
     total_chars_drawn = 0
@@ -615,7 +628,11 @@ def render(paragraphs, raw_heading, title, photo_path, byline, date_text, signat
         ri = 0
         n_rows = len(rows)
         while ri < n_rows:
-            cap = row_cap - (1 if indent else 0)
+            in_photo_zone = (photo_zone_x0 is not None and page.page_no == 1
+                              and page.band_top == first_band_top
+                              and page.cursor_x > photo_zone_x0)
+            row_cap = photo_cap_short if in_photo_zone else CHARS_PER_BAND
+            cap = max(1, row_cap - (1 if indent else 0))
 
             if page.cursor_x - COL_PITCH / 2 < page.content_left:
                 if page.ensure_room_for_band(BAND_H):
