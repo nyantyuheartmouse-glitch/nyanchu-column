@@ -24,10 +24,10 @@
 半角英数字は全角に変換して描画する。
 
 写真の切り抜き:
-    --photo-crop "x,y,w,h" で元写真から顔を中心に切り抜く範囲(左上座標と幅・高さ、
+    --photo-crop "x,y,w,h" で元写真から切り抜く範囲(左上座標と幅・高さ、
     元画像のピクセル単位、正方形を推奨)を指定できる。指定がなければ既定値
-    DEFAULT_PHOTO_CROP (S__91226114.jpg 用に選んだ値)を使う。切り抜いた範囲を
-    丸くトリミングして使う。
+    DEFAULT_PHOTO_CROP (S__91226114.jpg 用に選んだ値。顔と左右の青い耳の先まで
+    丸の中に収まるように選んでいる)を使う。切り抜いた範囲を丸くトリミングして使う。
 
 見出しの列の区切り:
     --heading の中に全角スラッシュ「／」または改行を入れると、そこが列(縦書きの
@@ -111,9 +111,9 @@ PHOTO_BORDER = 3
 PHOTO_COL_GAP = 16            # 見出しの最後の列と写真の専用列の間の余白
 PHOTO_CAPTION_GAP = 10
 PHOTO_CAPTION_SIZE = 20
-# S__91226114.jpg から顔を中心に切り抜く既定範囲 (x, y, w, h)。
-# 顔が丸の中央〜やや上に来て、顔が丸の大部分を占めるように選んだ値。
-DEFAULT_PHOTO_CROP = (145, 174, 480, 480)
+# S__91226114.jpg から切り抜く既定範囲 (x, y, w, h)。
+# 顔だけでなく左右の青い耳の先まで丸の中に収まるように選んだ値。
+DEFAULT_PHOTO_CROP = (21, 0, 720, 720)
 PHOTO_CAPTION_LINE_H = 26
 
 SIG_CELL = 28                 # 本文末尾の署名の文字サイズ(本文より小さい)
@@ -767,8 +767,9 @@ def main():
     ap.add_argument("--title", default="ニャンちゅうの未来語り", help="題字")
     ap.add_argument("--photo", default=None, help="顔写真(顔を中心に正方形トリミングして丸く見出し横の専用列に使用)")
     ap.add_argument("--photo-crop", default=None,
-                     help="元写真から顔を中心に切り抜く範囲 \"x,y,w,h\"(省略時は中央の正方形。"
-                          "S__91226114.jpg の場合は顔を中心にした既定値 DEFAULT_PHOTO_CROP を使う)")
+                     help="元写真から切り抜く範囲 \"x,y,w,h\"(省略時は中央の正方形。"
+                          "S__91226114.jpg の場合は顔と耳が収まるように選んだ既定値 "
+                          "DEFAULT_PHOTO_CROP を使う)")
     ap.add_argument("--byline", default="ニャンちゅう\n自称5歳・研究好き", help="写真下の肩書き(\\nで改行)")
     ap.add_argument("--signature", default="ニャンちゅう・自称5歳の研究好き",
                      help="本文末尾に入れる署名(括弧は自動で付く)")
