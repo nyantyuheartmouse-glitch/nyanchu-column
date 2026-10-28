@@ -8,7 +8,7 @@
 
     ~/.venv_column/bin/python3 render_column.py \
         --text column_text_2026-10.txt \
-        --heading "家に人型ロボットが当たり前になる日" \
+        --heading "家に人型ロボットが／当たり前になる日" \
         --photo ../S__91226114.jpg \
         --date "2026年10月" \
         --out ../columns/2026-10-xxxxxxxxxxxx
@@ -22,15 +22,33 @@
 長音「ー」「〜」「…」の縦向き、括弧「」『』()の縦書き用の向き、
 小さい仮名や読点の右上寄せは libraqm のvertical shapingに任せている。
 半角英数字は全角に変換して描画する。
-2桁の数字の並び(「(10)」のような参照番号や「2027」のような4桁の年号を2桁ずつ)は、
-縦中横(1マスの中に横向きで2文字並べる)で描画し、列の途中で分割しない。
+
+見出しの列の区切り:
+    --heading の中に全角スラッシュ「／」または改行を入れると、そこが列(縦書きの
+    1列)の区切りになる(例: "家に人型ロボットが／当たり前になる日" は2列になる)。
+    区切りの指定がない場合は、助詞(が・を・に・は・で・の・と)の直後など自然な
+    位置で自動的に列を分け、各列の文字数をできるだけ揃える。
+    1列に収まりきらないほど長い区切りは、やむを得ず機械的に文字数で分割する。
+
+数字の縦中横・禁則処理:
+    2桁の数字の並び(「(10)」のような参照番号の数字部分や「50」のような
+    2桁の数字)は縦中横(1マスの中に横向きで2文字並べる)で、本文の文字と
+    ほぼ同じ高さ・列幅の9割程度の大きさで描画する。
+    3桁以上の数字の並び(「2026」「2027」のような年号など)は縦中横にせず、
+    全角数字を縦に1字ずつ並べる。この並びは列の途中で分割しない
+    (括弧付き参照番号も、括弧を含めて1つの塊として列の途中で分割しない)。
+    禁則処理として、列の先頭に读点・句点・閉じ括弧・長音・小さい仮名などが
+    来ないよう、また列の最後に開き括弧が来ないよう、列の区切り位置を
+    前後に1字ずらして調整する(文字を間引いたり足したりはしない)。
 
 書体・扁平率:
     本文は新聞の活字らしく縦方向だけ潰した「扁平(平体)」で描画する
     (--flatten で比率を指定。既定0.88 = 高さ88%)。
     既定の本文書体は --font、見出し・題字の太い明朝は --head-font で切り替えられる
     (tools/fonts/ 以下に Google Fonts(OFL)から取得した同梱フォントを使用)。
-    写真(顔写真)は見出しの左下に正方形で配置し、下に肩書きを添える。
+    写真(顔写真)は見出しの横に、見出しのどの列とも重ならない専用の列を確保して
+    正方形で配置し、下に肩書きを添える(写真・肩書き・見出し・本文の境界箱が
+    互いに重ならないことをスクリプト側で検査する)。
 """
 import argparse
 import os
@@ -77,11 +95,12 @@ MASTHEAD_Y0 = 28
 MASTHEAD_H = 104             # 題字の帯(写真を外した分、以前より低い)
 HEADER_RULE_GAP = 22
 
-# --- 写真(見出し左下)まわりのレイアウト ------------------------------
+# --- 写真(見出しの横)まわりのレイアウト ------------------------------
+# 写真・肩書きは見出しの列とは別の専用の列に、見出しと横並びで配置する
+# (見出しのどの列とも x 方向に重ならない)。
 PHOTO_SIZE = 124
 PHOTO_BORDER = 3
-PHOTO_ZONE_COLS = 2          # 写真の下にくる見出し列の本数(右から数えて最後の1〜2列)
-PHOTO_GAP_ABOVE = 18          # 写真帯の直前の見出し列テキストとの間隔
+PHOTO_COL_GAP = 16            # 見出しの最後の列と写真の専用列の間の余白
 PHOTO_CAPTION_GAP = 10
 PHOTO_CAPTION_SIZE = 20
 PHOTO_CAPTION_LINE_H = 26
@@ -94,6 +113,16 @@ FOOTER_H = 70                 # 罫線から画像下端まで(日付を含む�
 
 ZEN_DIGITS = "０１２３４５６７８９"
 ZEN_DIGIT_SET = set(ZEN_DIGITS)
+
+# 縦書きの禁則処理: 列の先頭に来てはいけない文字(前の列に送り込む)。
+LEADING_FORBID = set("、。」』）！？・ー") | set(
+    "ゃゅょっぁぃぅぇぉゎァィゥェォッャュョヵヶ"
+)
+# 列の最後に来てはいけない文字(次の列へ送る)。
+TRAILING_FORBID = set("「『（")
+
+# 見出しの自動区切りに使う助詞(この直後で列を切るのが自然)。
+HEADING_PARTICLES = "がをにはでのと"
 
 
 def fullwidth(s: str) -> str:
@@ -186,8 +215,10 @@ def draw_vertical_chunk(img: Image.Image, draw: ImageDraw.ImageDraw, cx: float, 
 
 
 def draw_tatechuyoko(img: Image.Image, draw: ImageDraw.ImageDraw, cx: float, y_top: float,
-                      text: str, font, cell: int, flatten: float = 1.0):
-    """2桁の数字などを1マスの中に横向きで並べて描画する(縦中横、扁平体対応)。"""
+                      text: str, font, cell: int, flatten: float = 1.0, target_w: int = None):
+    """2桁の数字などを1マスの中に横向きで並べて描画する(縦中横、扁平体対応)。
+    target_w を渡すと、描画結果を横方向にその幅まで拡縮してからマスの中央に置く
+    (列幅いっぱいに大きく見せるため)。"""
     bbox = draw.textbbox((0, 0), text, font=font)
     w = bbox[2] - bbox[0]
     h = bbox[3] - bbox[1]
@@ -195,6 +226,10 @@ def draw_tatechuyoko(img: Image.Image, draw: ImageDraw.ImageDraw, cx: float, y_t
         return
     tmp = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     ImageDraw.Draw(tmp).text((-bbox[0], -bbox[1]), text, font=font, fill=INK + (255,))
+    if target_w and target_w > 0 and round(target_w) != w:
+        new_w = max(1, round(target_w))
+        tmp = tmp.resize((new_w, h), Image.LANCZOS)
+        w = new_w
     x = round(cx - w / 2)
     _flatten_paste(img, tmp, bbox, x, y_top + cell / 2, flatten, "center")
 
@@ -203,23 +238,19 @@ def draw_tatechuyoko(img: Image.Image, draw: ImageDraw.ImageDraw, cx: float, y_t
 # 段落文字列を「1マス分の描画単位(row)」の列に変換する。
 # 通常の文字は1マス=1文字。
 # 「（１０）」のような括弧付き参照番号や、2桁以上の全角数字の並びは、
-# 数字を2桁ずつ縦中横(1マスに横並びで2文字)にまとめ、
-# 括弧を含めて1つの塊(group)として列の途中で分割しないようにする。
+# ちょうど2桁なら縦中横(1マスに横並びで2文字)、3桁以上なら全角数字を
+# 縦に1字ずつ並べて描画し、どちらも同じ group にまとめて列の途中で
+# 分割しないようにする(括弧付き参照番号は括弧も含めて1つの塊)。
 
 _PAREN_DIGITS_RE = re.compile(r"[（(]([０-９0-9]+)[）)]")
 
 
-def _digit_pair_rows(run: str, group: int):
-    rows = []
-    k = 0
-    n = len(run)
-    if n % 2 == 1:
-        rows.append({"text": run[0], "tatechuyoko": False, "group": group})
-        k = 1
-    while k < n:
-        rows.append({"text": run[k:k + 2], "tatechuyoko": True, "group": group})
-        k += 2
-    return rows
+def _digit_group_rows(run: str, group: int):
+    """数字の並びを1つの group の row 列に変換する。
+    ちょうど2桁なら縦中横1マス、それ以外(1桁 or 3桁以上)は1字ずつの通常マス。"""
+    if len(run) == 2:
+        return [{"text": run, "tatechuyoko": True, "group": group}]
+    return [{"text": ch, "tatechuyoko": False, "group": group} for ch in run]
 
 
 def tokenize_paragraph(text: str):
@@ -233,7 +264,7 @@ def tokenize_paragraph(text: str):
             gid = group_id
             group_id += 1
             rows.append({"text": text[i], "tatechuyoko": False, "group": gid})  # （
-            rows.extend(_digit_pair_rows(m.group(1), gid))
+            rows.extend(_digit_group_rows(m.group(1), gid))
             rows.append({"text": text[m.end() - 1], "tatechuyoko": False, "group": gid})  # ）
             i = m.end()
             continue
@@ -245,7 +276,7 @@ def tokenize_paragraph(text: str):
             if len(run) >= 2:
                 gid = group_id
                 group_id += 1
-                rows.extend(_digit_pair_rows(run, gid))
+                rows.extend(_digit_group_rows(run, gid))
             else:
                 rows.append({"text": run, "tatechuyoko": False, "group": None})
             i = j
@@ -264,6 +295,107 @@ def _group_run_length(rows, start_idx):
     while j < len(rows) and rows[j]["group"] == gid:
         j += 1
     return j - start_idx
+
+
+def _shrink_to_group_boundary(rows, ri, taken):
+    """taken を1減らした境界が group の途中なら、group の境界に揃うまでさらに減らす。"""
+    while taken > 1:
+        cur = rows[ri + taken - 1]
+        nxt = rows[ri + taken] if ri + taken < len(rows) else None
+        if nxt is not None and cur["group"] is not None and cur["group"] == nxt["group"]:
+            taken -= 1
+            continue
+        break
+    return taken
+
+
+def _apply_kinsoku(rows, ri, taken, n_rows):
+    """禁則処理: 列の最後が開き括弧、または次列の先頭が行頭禁則文字にならないよう
+    taken を調整する。文字を間引いたり足したりはせず、列の区切り位置を前後に
+    ずらすだけ(全体の文字数は変わらない)。"""
+    while taken > 1 and rows[ri + taken - 1]["text"] in TRAILING_FORBID:
+        taken -= 1
+        taken = _shrink_to_group_boundary(rows, ri, taken)
+    while taken > 1 and ri + taken < n_rows and rows[ri + taken]["text"] in LEADING_FORBID:
+        taken -= 1
+        taken = _shrink_to_group_boundary(rows, ri, taken)
+    return taken
+
+
+def verify_kinsoku(column_texts):
+    """各列の先頭・末尾に禁則文字が来ていないかを検査する。"""
+    for col in column_texts:
+        if not col:
+            continue
+        assert col[0] not in LEADING_FORBID, f"禁則違反: 列が「{col[0]}」で始まっているニャ: {col!r}"
+        assert col[-1] not in TRAILING_FORBID, f"禁則違反: 列が「{col[-1]}」で終わっているニャ: {col!r}"
+
+
+def _rects_overlap(a, b):
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    return ax0 < bx1 and bx0 < ax1 and ay0 < by1 and by0 < ay1
+
+
+def verify_no_overlap(heading_rects, photo_rect, body_rects):
+    """写真・肩書き・見出し・本文の境界箱が互いに重ならないことを検査する。"""
+    if photo_rect is not None:
+        for hr in heading_rects:
+            assert not _rects_overlap(hr, photo_rect), \
+                f"見出し列{hr}と写真{photo_rect}が重なっているニャ"
+        for br in body_rects:
+            assert not _rects_overlap(br, photo_rect), \
+                f"本文列{br}と写真{photo_rect}が重なっているニャ"
+    for hr in heading_rects:
+        for br in body_rects:
+            assert not _rects_overlap(hr, br), f"見出し列{hr}と本文列{br}が重なっているニャ"
+
+
+# --- 見出しの列区切り -----------------------------------------------------
+
+def _balanced_heading_breaks(heading: str, cap: int):
+    """区切り指定がないとき、助詞の直後など自然な位置で見出しを列に分ける。
+    各列の長さをできるだけ揃える。"""
+    n = len(heading)
+    if n <= cap:
+        return [heading]
+    ncols = -(-n // cap)  # ceil
+    ideal = n / ncols
+    candidates = [i for i in range(1, n) if heading[i - 1] in HEADING_PARTICLES]
+    segments = []
+    start = 0
+    for c in range(ncols - 1):
+        remaining_cols = ncols - c
+        lo = start + 1
+        hi = min(start + cap, n - (remaining_cols - 1))
+        hi = max(hi, lo)
+        target = start + ideal
+        window = [b for b in candidates if lo <= b <= hi]
+        if window:
+            cut = min(window, key=lambda b: abs(b - target))
+        else:
+            cut = max(lo, min(hi, round(target)))
+        segments.append(heading[start:cut])
+        start = cut
+    segments.append(heading[start:])
+    return segments
+
+
+def split_heading(raw_heading: str, cap: int):
+    """--heading 文字列を見出しの列に分割する。「／」や改行があればそこで区切り、
+    なければ助詞の直後など自然な位置で自動的に、長さを揃えて区切る。
+    1列に収まりきらない区切りは機械的に cap 文字ずつへさらに分割する。"""
+    explicit = [s for s in (seg.strip() for seg in re.split(r"[／\n]+", raw_heading)) if s]
+    segments = explicit if len(explicit) > 1 else _balanced_heading_breaks(raw_heading, cap)
+    cols = []
+    for seg in segments:
+        seg = fullwidth(seg)
+        while len(seg) > cap:
+            cols.append(seg[:cap])
+            seg = seg[cap:]
+        if seg:
+            cols.append(seg)
+    return cols
 
 
 def square_photo(path: str, size: int) -> Image.Image:
@@ -389,9 +521,10 @@ class Page:
 
 def _place_photo_and_caption(page: Page, photo_img, byline: str, body_font_path: str,
                               zone_x0: float, zone_x1: float, top_y: float):
-    """見出しの左下に正方形写真と肩書きキャプションを置く。"""
+    """見出しの横の専用列に正方形写真と肩書きキャプションを置く。
+    描画した写真+キャプションの境界箱 (x0, y0, x1, y1) を返す。"""
     if photo_img is None:
-        return
+        return None
     px = round((zone_x0 + zone_x1) / 2 - PHOTO_SIZE / 2)
     px = max(page.content_left, min(px, page.content_right - PHOTO_SIZE))
     py = round(top_y)
@@ -399,16 +532,23 @@ def _place_photo_and_caption(page: Page, photo_img, byline: str, body_font_path:
 
     cap_font = get_font(PHOTO_CAPTION_SIZE, body_font_path)
     cap_y = py + PHOTO_SIZE + PHOTO_CAPTION_GAP
-    for i, line in enumerate(byline.split("\n")):
+    lines = byline.split("\n")
+    max_cw = 0.0
+    for i, line in enumerate(lines):
         cb = page.draw.textbbox((0, 0), line, font=cap_font)
         cw = cb[2] - cb[0]
+        max_cw = max(max_cw, cw)
         cx = px + PHOTO_SIZE / 2 - cw / 2 - cb[0]
         page.draw.text((cx, cap_y + i * PHOTO_CAPTION_LINE_H), line, font=cap_font, fill=INK)
-    page.max_y_used = max(page.max_y_used,
-                           cap_y + len(byline.split("\n")) * PHOTO_CAPTION_LINE_H)
+    bottom = cap_y + len(lines) * PHOTO_CAPTION_LINE_H
+    page.max_y_used = max(page.max_y_used, bottom)
+
+    left = min(px, px + PHOTO_SIZE / 2 - max_cw / 2)
+    right = max(px + PHOTO_SIZE, px + PHOTO_SIZE / 2 + max_cw / 2)
+    return (left, py, right, bottom)
 
 
-def render(paragraphs, heading, title, photo_path, byline, date_text, signature,
+def render(paragraphs, raw_heading, title, photo_path, byline, date_text, signature,
            body_font_path, head_font_path, title_font_path, flatten, out_prefix):
     photo_img = square_photo(photo_path, PHOTO_SIZE) if photo_path else None
 
@@ -416,53 +556,58 @@ def render(paragraphs, heading, title, photo_path, byline, date_text, signature,
     page_no = 1
     page = Page(page_no, True, title_font_path, head_font_path, title)
     page.new_band(BAND_H)
+    first_band_top = page.band_top
 
     # --- 見出し(本文より大きい縦書き、右端) ---
-    # 写真を見出しの左下に置くため、見出しの最後の1〜2列(左端)は
-    # 文字数を減らして短くし、その下に写真+キャプションの帯を確保する。
-    photo_zone_h = PHOTO_SIZE + PHOTO_CAPTION_GAP + 2 * PHOTO_CAPTION_LINE_H
-    max_rows_in_zone_col = max(1, int((BAND_H - photo_zone_h - PHOTO_GAP_ABOVE) // HEAD_CELL))
-    zone_capacity = PHOTO_ZONE_COLS * max_rows_in_zone_col
     normal_rows_cap = max(1, BAND_H // HEAD_CELL)
+    heading_cols = split_heading(raw_heading, normal_rows_cap)
 
     head_font = get_font(HEAD_CELL, head_font_path)
-    zone_cols_x = []  # 写真帯になった列の (left, right) 一覧
-    remaining = len(heading)
-    hi = 0
-    while hi < len(heading):
-        in_zone = remaining <= zone_capacity
-        cap_here = max_rows_in_zone_col if in_zone else normal_rows_cap
-        chunk = heading[hi:hi + cap_here]
-        hi += len(chunk)
-        remaining -= len(chunk)
-
+    heading_rects = []
+    for col_text in heading_cols:
         if page.cursor_x - HEAD_PITCH / 2 < page.content_left:
             pages.append(page.draw_footer_and_crop(False, date_text, body_font_path))
             page_no += 1
             page = Page(page_no, False, title_font_path, head_font_path, title)
             page.new_band(BAND_H)
 
+        col_x0 = page.cursor_x - HEAD_PITCH
+        col_x1 = page.cursor_x
         col_cx = page.cursor_x - HEAD_PITCH / 2
-        draw_vertical_chunk(page.img, page.draw, col_cx, page.band_top, chunk, head_font, flatten=1.0)
-        page.max_y_used = max(page.max_y_used, page.band_top + len(chunk) * HEAD_CELL)
-        if in_zone:
-            zone_cols_x.append((page.cursor_x - HEAD_PITCH, page.cursor_x))
+        draw_vertical_chunk(page.img, page.draw, col_cx, page.band_top, col_text, head_font, flatten=1.0)
+        col_h = len(col_text) * HEAD_CELL
+        page.max_y_used = max(page.max_y_used, page.band_top + col_h)
+        if page.page_no == 1 and page.band_top == first_band_top:
+            heading_rects.append((col_x0, page.band_top, col_x1, page.band_top + col_h))
         page.cursor_x -= HEAD_PITCH
 
-    if zone_cols_x and photo_img is not None:
-        zx0 = min(x0 for x0, _ in zone_cols_x)
-        zx1 = max(x1 for _, x1 in zone_cols_x)
-        photo_top = page.band_top + max_rows_in_zone_col * HEAD_CELL + PHOTO_GAP_ABOVE
-        _place_photo_and_caption(page, photo_img, byline, body_font_path, zx0, zx1, photo_top)
+    # --- 写真(見出しの横、専用の列。見出しのどの列とも重ならない) ---
+    photo_rect = None
+    if photo_img is not None:
+        cap_font = get_font(PHOTO_CAPTION_SIZE, body_font_path)
+        max_cap_w = 0.0
+        for line in byline.split("\n"):
+            cb = page.draw.textbbox((0, 0), line, font=cap_font)
+            max_cap_w = max(max_cap_w, cb[2] - cb[0])
+        content_w = max(PHOTO_SIZE, max_cap_w)
+        photo_col_pitch = content_w + 24
+        zone_x1 = page.cursor_x - PHOTO_COL_GAP
+        zone_x0 = max(page.content_left, zone_x1 - photo_col_pitch)
+        photo_rect = _place_photo_and_caption(page, photo_img, byline, body_font_path,
+                                               zone_x0, zone_x1, page.band_top)
+        page.cursor_x = zone_x0
 
-    page.cursor_x -= COL_PITCH // 3  # 見出しと本文の間の余白
+    page.cursor_x -= COL_PITCH // 3  # 見出し/写真と本文の間の余白
 
     body_font = get_font(CELL, body_font_path)
-    tcy_font = get_font(round(CELL * 0.56), body_font_path)
+    tcy_font = get_font(CELL, body_font_path)
+    tcy_target_w = round(COL_PITCH * 0.9)
     row_cap = CHARS_PER_BAND
 
     total_chars_in = sum(len(p) for p in paragraphs)
     total_chars_drawn = 0
+    body_columns_text = []
+    first_band_body_rects = []
 
     for para in paragraphs:
         rows = tokenize_paragraph(para)
@@ -493,13 +638,16 @@ def render(paragraphs, heading, title, photo_path, byline, date_text, signature,
             if taken == 0:
                 taken = 1  # 塊そのものが1列の容量より大きい場合のフォールバック
 
+            taken = _apply_kinsoku(rows, ri, taken, n_rows)
+
             y0 = page.band_top + (CELL if indent else 0)
             y = y0
             for k in range(taken):
                 item = rows[ri + k]
                 cx = page.cursor_x - COL_PITCH / 2
                 if item["tatechuyoko"]:
-                    draw_tatechuyoko(page.img, page.draw, cx, y, item["text"], tcy_font, CELL, flatten=flatten)
+                    draw_tatechuyoko(page.img, page.draw, cx, y, item["text"], tcy_font, CELL,
+                                      flatten=flatten, target_w=tcy_target_w)
                 else:
                     draw_vertical_chunk(page.img, page.draw, cx, y, item["text"], body_font, flatten=flatten)
                 total_chars_drawn += len(item["text"])
@@ -507,6 +655,12 @@ def render(paragraphs, heading, title, photo_path, byline, date_text, signature,
                 y += CELL
             page.max_y_used = max(page.max_y_used, y)
             assert y0 + taken * CELL <= page.footer_top + FOOTER_GAP + FOOTER_H, "段が footer 領域にはみ出した"
+
+            col_text = "".join(rows[ri + k]["text"] for k in range(taken))
+            body_columns_text.append(col_text)
+            if page.page_no == 1 and page.band_top == first_band_top:
+                first_band_body_rects.append(
+                    (page.cursor_x - COL_PITCH, y0, page.cursor_x, y0 + taken * CELL))
 
             page.cursor_x -= COL_PITCH
             ri += taken
@@ -545,6 +699,9 @@ def render(paragraphs, heading, title, photo_path, byline, date_text, signature,
             f"配置した文字数({total_chars_drawn})が本文の文字数({total_chars_in})と一致しないニャ"
         )
 
+    verify_kinsoku(body_columns_text + heading_cols)
+    verify_no_overlap(heading_rects, photo_rect, first_band_body_rects)
+
     out_paths = []
     for i, img in enumerate(pages, start=1):
         path = f"{out_prefix}-{i}.png"
@@ -565,9 +722,11 @@ def verify_images(out_paths, page_h_max=PAGE_H_MAX):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--text", required=True, help="本文テキストファイル(段落は空行区切り)")
-    ap.add_argument("--heading", required=True, help="見出し(問い)")
+    ap.add_argument("--heading", required=True,
+                     help="見出し(問い)。全角スラッシュ「／」や改行で列の区切り位置を指定できる"
+                          "(指定がなければ助詞の直後などで自動的に区切る)")
     ap.add_argument("--title", default="ニャンちゅうの未来語り", help="題字")
-    ap.add_argument("--photo", default=None, help="顔写真(正方形に中央トリミングして見出し左下に使用)")
+    ap.add_argument("--photo", default=None, help="顔写真(正方形に中央トリミングして見出し横の専用列に使用)")
     ap.add_argument("--byline", default="ニャンちゅう\n自称5歳・研究好き", help="写真下の肩書き(\\nで改行)")
     ap.add_argument("--signature", default="ニャンちゅう・自称5歳の研究好き",
                      help="本文末尾に入れる署名(括弧は自動で付く)")
@@ -581,7 +740,6 @@ def main():
     args = ap.parse_args()
 
     paragraphs = load_paragraphs(args.text)
-    heading = fullwidth(args.heading)
     byline = fullwidth(args.byline)
     date_text = fullwidth(args.date)
 
@@ -589,7 +747,7 @@ def main():
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    paths, drawn, expected = render(paragraphs, heading, args.title, args.photo, byline, date_text,
+    paths, drawn, expected = render(paragraphs, args.heading, args.title, args.photo, byline, date_text,
                                      args.signature, args.font, args.head_font, args.title_font,
                                      args.flatten, args.out)
     verify_images(paths)
